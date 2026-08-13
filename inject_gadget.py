@@ -52,6 +52,24 @@ def main() -> None:
     if not main_binary.exists():
         raise SystemExit(f"Expected main binary at {main_binary}, not found")
 
+    # The Watch companion app (Telegram.app/Watch/*.app) is a double
+    # liability: (1) its Mach-O is a fat/universal binary that crashed
+    # appdecrypt's naive parser early on, and (2) its Info.plist's
+    # WKCompanionAppBundleIdentifier points at the *original* bundle ID.
+    # Sideloadly (and any resigner that changes the bundle ID, which most
+    # do to dodge collisions) doesn't update that nested reference, so the
+    # installer rejects the whole ipa with InvalidCompanionAppBundleIdentifier
+    # - confirmed live via Sideloadly's install log on this exact file. We
+    # don't need the Watch app for dumping the main binary under Frida, so
+    # just remove it rather than trying to patch its Info.plist to track
+    # whatever ID the resigner ends up choosing.
+    watch_dir = app_dir / "Watch"
+    if watch_dir.is_dir():
+        shutil.rmtree(watch_dir)
+        print("[*] Removed Watch companion app (avoids InvalidCompanionAppBundleIdentifier on resign)")
+    else:
+        print("[*] No Watch companion app present, nothing to remove")
+
     frameworks_dir = app_dir / "Frameworks"
     frameworks_dir.mkdir(exist_ok=True)
     gadget_dest = frameworks_dir / "FridaGadget.dylib"
