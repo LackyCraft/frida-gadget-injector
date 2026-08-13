@@ -1,0 +1,70 @@
+name: Inject Frida Gadget into IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: 'URL of the .ipa to patch (default: the telegram.ipa test fixture)'
+        required: false
+        default: 'https://github.com/LackyCraft/appdecrypt/releases/download/test-fixtures/telegram.ipa'
+      output_name:
+        description: 'Output filename for the patched, unsigned .ipa'
+        required: false
+        default: 'patched.ipa'
+
+jobs:
+  inject:
+    # No macOS needed at all for this step - LIEF does the Mach-O patching
+    # in pure Python, and signing is deliberately left to AltStore/
+    # Sideloadly/Xcode on install, since they re-sign the whole bundle
+    # anyway. Plain Linux runner, free/unlimited on a public repo.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install LIEF
+        run: pip install lief
+
+      - name: Download target .ipa
+        run: |
+          set -e
+          echo "Downloading ${{ github.event.inputs.ipa_url }}"
+          curl -L --fail -o target.ipa "${{ github.event.inputs.ipa_url }}"
+          ls -la target.ipa
+
+      - name: Download latest Frida Gadget (iOS)
+        run: |
+          set -e
+          ASSET_URL=$(curl -s https://api.github.com/repos/frida/frida/releases/latest \
+            | grep '"browser_download_url"' \
+            | grep 'ios-universal.dylib.xz' \
+            | grep -v simulator \
+            | cut -d '"' -f4)
+          echo "Resolved: $ASSET_URL"
+          if [ -z "$ASSET_URL" ]; then
+            echo "Could not resolve the FridaGadget iOS asset URL from the latest release"
+            exit 2
+          fi
+          curl -L --fail -o gadget.dylib.xz "$ASSET_URL"
+          xz -d gadget.dylib.xz
+          ls -la gadget.dylib
+          file gadget.dylib
+
+      - name: Inject Frida Gadget
+        run: |
+          set -e
+          python3 inject_gadget.py target.ipa gadget.dylib "${{ github.event.inputs.output_name }}"
+          ls -la "${{ github.event.inputs.output_name }}"
+
+      - name: Upload patched ipa as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: patched-ipa
+          path: ${{ github.event.inputs.output_name }}
