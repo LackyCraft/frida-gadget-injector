@@ -100,6 +100,22 @@ def main() -> None:
             removed += 1
     print(f"[*] Removed {removed} stale _CodeSignature director{'y' if removed == 1 else 'ies'}")
 
+    # Apple's App Store CDN stamps the ipa root with META-INF/
+    # com.apple.ZipMetadata.plist (+ .bin), which records the *original*
+    # RecordCount and TotalUncompressedBytes for the archive. We add a file
+    # and change another's size, so those recorded numbers no longer match
+    # reality - and this is exactly what tools like iMazing check to
+    # detect "tampering" (its error fired even after the _CodeSignature
+    # fix, on this exact file). There's no public spec for recomputing
+    # ZipTool's metadata correctly, so - same call as _CodeSignature -
+    # just drop the now-stale directory rather than ship wrong values.
+    meta_inf = work / "META-INF"
+    if meta_inf.is_dir():
+        shutil.rmtree(meta_inf)
+        print("[*] Removed stale META-INF (com.apple.ZipMetadata.plist) directory")
+    else:
+        print("[*] No META-INF directory present, nothing to remove")
+
     gadget_arcname = str(gadget_dest.relative_to(work))
     executable_new_files = {gadget_arcname}
 
