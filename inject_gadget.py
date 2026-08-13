@@ -116,6 +116,19 @@ def main() -> None:
     else:
         print("[*] No META-INF directory present, nothing to remove")
 
+    # SC_Info/*.sinf holds the original FairPlay DRM license blob for the
+    # app - confirmed live on-device (libcopyfile.dylib) that install fails
+    # with EPERM trying to open() this exact file while staging the app for
+    # (re)signing. FairPlay SINF handling is privileged/Apple-only; a
+    # sideloaded, locally re-signed app has no business with it. Same
+    # treatment as the other two stale-signing-artifact directories.
+    removed_sc_info = 0
+    for sc_info_dir in work.rglob("SC_Info"):
+        if sc_info_dir.is_dir():
+            shutil.rmtree(sc_info_dir)
+            removed_sc_info += 1
+    print(f"[*] Removed {removed_sc_info} stale SC_Info director{'y' if removed_sc_info == 1 else 'ies'}")
+
     gadget_arcname = str(gadget_dest.relative_to(work))
     executable_new_files = {gadget_arcname}
 
