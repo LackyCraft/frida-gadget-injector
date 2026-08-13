@@ -84,6 +84,22 @@ def main() -> None:
     fat.write(str(main_binary))
     print(f"[*] Wrote patched binary to {main_binary}")
 
+    # Every signable bundle (the main .app, each .framework/.appex, and any
+    # nested .app like a Watch companion) carries its own
+    # _CodeSignature/CodeResources - a manifest of hashes over every file in
+    # that bundle. We changed the main binary and added a new file, so the
+    # main app's manifest is now stale and no longer matches reality.
+    # Installers/validators that check it (iMazing does; SideStore
+    # apparently doesn't) will flag the ipa as "tampered". Since every
+    # sideload path re-signs the whole bundle anyway (which regenerates
+    # these), just strip the stale ones instead of trying to recompute them.
+    removed = 0
+    for sig_dir in work.rglob("_CodeSignature"):
+        if sig_dir.is_dir():
+            shutil.rmtree(sig_dir)
+            removed += 1
+    print(f"[*] Removed {removed} stale _CodeSignature director{'y' if removed == 1 else 'ies'}")
+
     gadget_arcname = str(gadget_dest.relative_to(work))
     executable_new_files = {gadget_arcname}
 
