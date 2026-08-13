@@ -99,6 +99,27 @@ def main() -> None:
         except Exception as e:
             print(f"[*] remove_signature: {e} (probably wasn't signed, fine)")
 
+        # Confirmed live on-device: launchd refuses to spawn the process at
+        # all ("Launchd job spawn failed", POSIX 80) while LC_ENCRYPTION_INFO_64
+        # still declares cryptid=1 and we have no valid FairPlay key material
+        # (SC_Info was removed - it broke installation, see above) for the
+        # kernel to decrypt against. Zeroing cryptid does NOT decrypt the
+        # actual __TEXT bytes - they stay ciphertext - but it stops the
+        # kernel from refusing to exec() the binary at all. dyld runs every
+        # loaded dylib's constructors (including FridaGadget's) before
+        # jumping into the main executable's own entry point, so Frida gets
+        # a window to attach even though the app's own code is still
+        # garbage and will crash once it's reached.
+        enc_info = getattr(binary, "encryption_info", None)
+        if enc_info is not None and getattr(enc_info, "cryptid", 0) != 0:
+            print(f"[*] Found LC_ENCRYPTION_INFO_64 with cryptid={enc_info.cryptid}, zeroing it "
+                  f"(binary stays encrypted, this only unblocks exec())")
+            enc_info.cryptid = 0
+        elif enc_info is not None:
+            print("[*] LC_ENCRYPTION_INFO_64 present but cryptid already 0")
+        else:
+            print("[*] No LC_ENCRYPTION_INFO_64 on this slice")
+
     fat.write(str(main_binary))
     print(f"[*] Wrote patched binary to {main_binary}")
 
