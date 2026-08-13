@@ -70,6 +70,29 @@ def main() -> None:
     else:
         print("[*] No Watch companion app present, nothing to remove")
 
+    # App extensions (Share, Widget, NotificationService, Intents,
+    # BroadcastUpload, etc.) each get their own App ID + provisioning
+    # profile during local free-tier resigning, and several of them share
+    # an App Group container with the main app for cross-process data.
+    # Confirmed empirically: two independent complex multi-extension apps
+    # (Telegram, Spotify) both install "successfully" via Sideloadly
+    # (100% Complete) but then fail to actually launch (icon/splash then
+    # immediate close) - identical behavior on a *control* build with zero
+    # Mach-O changes, ruling out our LIEF patching. A control build of
+    # Spotify with only the Watch app removed still failed. Since we only
+    # need the *main* binary to dump under Frida, stripping every
+    # extension removes the whole multi-target App Group signing surface
+    # rather than trying to chase whatever entitlement mismatch a free
+    # account's local resigning produces across N separately-provisioned
+    # targets.
+    plugins_dir = app_dir / "PlugIns"
+    if plugins_dir.is_dir():
+        removed_ext = sorted(p.name for p in plugins_dir.iterdir())
+        shutil.rmtree(plugins_dir)
+        print(f"[*] Removed {len(removed_ext)} app extension(s) from PlugIns: {removed_ext}")
+    else:
+        print("[*] No PlugIns directory present, nothing to remove")
+
     frameworks_dir = app_dir / "Frameworks"
     frameworks_dir.mkdir(exist_ok=True)
     gadget_dest = frameworks_dir / "FridaGadget.dylib"
@@ -171,11 +194,30 @@ def main() -> None:
     gadget_arcname = str(gadget_dest.relative_to(work))
     executable_new_files = {gadget_arcname}
 
+    # The original ipa has ~110 explicit directory entries (arcnames ending
+    # in "/", zero-length). Our rglob loop used to skip everything that
+    # wasn't a file, so the repackaged zip had *zero* directory entries -
+    # confirmed by comparing directly against the source zip's namelist().
+    # A control build (identical to this one but with zero Mach-O changes)
+    # still failed to launch after Sideloadly resigning, which ruled out
+    # the LIEF patching as the cause and pointed back at the repackaging
+    # step itself - this is the most concrete structural difference found,
+    # so directories are now written explicitly too.
     if args.ipa_out.exists():
         args.ipa_out.unlink()
     print(f"[*] Repackaging to {args.ipa_out}")
     with zipfile.ZipFile(args.ipa_out, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in sorted(work.rglob("*")):
+            if path.is_dir():
+                arcname = str(path.relative_to(work)) + "/"
+                info = zipfile.ZipInfo(arcname)
+                info.compress_type = zipfile.ZIP_STORED
+                if arcname in original_attrs:
+                    info.external_attr = original_attrs[arcname]
+                else:
+                    info.external_attr = (0o040755 << 16) | 0x10
+                zf.writestr(info, b"")
+                continue
             if not path.is_file():
                 continue
             arcname = str(path.relative_to(work))
