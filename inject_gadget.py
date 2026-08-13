@@ -36,6 +36,13 @@ def main() -> None:
 
     print(f"[*] Extracting {args.ipa_in}")
     with zipfile.ZipFile(args.ipa_in) as zf:
+        # zipfile.write()/extractall() do NOT reliably round-trip unix
+        # permission bits (external_attr) - if the repackaged executable
+        # loses its +x bit, installers can choke on it (this is a known
+        # cause of on-device installer crashes). Remember the original
+        # per-entry external_attr so we can restore it for unmodified
+        # files below.
+        original_attrs = {info.filename: info.external_attr for info in zf.infolist()}
         zf.extractall(work)
 
     payload_dir = work / "Payload"
@@ -77,13 +84,32 @@ def main() -> None:
     fat.write(str(main_binary))
     print(f"[*] Wrote patched binary to {main_binary}")
 
+    gadget_arcname = str(gadget_dest.relative_to(work))
+    executable_new_files = {gadget_arcname}
+
     if args.ipa_out.exists():
         args.ipa_out.unlink()
     print(f"[*] Repackaging to {args.ipa_out}")
     with zipfile.ZipFile(args.ipa_out, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path in work.rglob("*"):
-            if path.is_file():
-                zf.write(path, path.relative_to(work))
+        for path in sorted(work.rglob("*")):
+            if not path.is_file():
+                continue
+            arcname = str(path.relative_to(work))
+            info = zipfile.ZipInfo(arcname)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            if arcname in original_attrs:
+                # Unmodified (or content-modified but not new) file - keep
+                # whatever permissions/flags it had in the source ipa.
+                info.external_attr = original_attrs[arcname]
+            elif arcname in executable_new_files:
+                # New file we added ourselves (the gadget dylib) - needs
+                # the executable bit or dyld/the installer can reject it.
+                info.external_attr = (0o100755 << 16)
+            else:
+                info.external_attr = (0o100644 << 16)
+            zf.writestr(info, path.read_bytes())
+    print(f"[*] Preserved original permissions for {len(original_attrs)} entries, "
+          f"set 755 on {len(executable_new_files)} new file(s)")
 
     print("[+] Done.")
     print(f"    Patched, UNSIGNED ipa: {args.ipa_out}")
