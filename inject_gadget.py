@@ -133,13 +133,22 @@ def main() -> None:
         # jumping into the main executable's own entry point, so Frida gets
         # a window to attach even though the app's own code is still
         # garbage and will crash once it's reached.
+        # NOTE: LIEF's Python binding names this field `crypt_id` (with an
+        # underscore), NOT `cryptid` like the raw Mach-O struct/most docs.
+        # An earlier version of this script used `cryptid`, which silently
+        # no-opped via getattr(..., 0)'s default instead of raising - so it
+        # always reported "already 0" and never actually touched anything.
+        # Confirmed directly: both Telegram's and Spotify's main binaries
+        # have crypt_id == 1, matching the observed "installs fine, closes
+        # instantly on launch" behavior on every build tested so far (this
+        # "fix" was a no-op the whole time).
         enc_info = getattr(binary, "encryption_info", None)
-        if enc_info is not None and getattr(enc_info, "cryptid", 0) != 0:
-            print(f"[*] Found LC_ENCRYPTION_INFO_64 with cryptid={enc_info.cryptid}, zeroing it "
+        if enc_info is not None and getattr(enc_info, "crypt_id", 0) != 0:
+            print(f"[*] Found LC_ENCRYPTION_INFO_64 with crypt_id={enc_info.crypt_id}, zeroing it "
                   f"(binary stays encrypted, this only unblocks exec())")
-            enc_info.cryptid = 0
+            enc_info.crypt_id = 0
         elif enc_info is not None:
-            print("[*] LC_ENCRYPTION_INFO_64 present but cryptid already 0")
+            print(f"[*] LC_ENCRYPTION_INFO_64 present, crypt_id already {enc_info.crypt_id}")
         else:
             print("[*] No LC_ENCRYPTION_INFO_64 on this slice")
 
