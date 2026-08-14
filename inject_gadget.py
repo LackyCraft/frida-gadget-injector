@@ -99,6 +99,29 @@ def main() -> None:
     shutil.copy(args.gadget_dylib, gadget_dest)
     print(f"[*] Copied Frida Gadget to {gadget_dest}")
 
+    def zero_crypt_id(binary, label: str) -> None:
+        # Confirmed live on-device: launchd/dyld refuses to spawn or load a
+        # Mach-O at all while LC_ENCRYPTION_INFO_64 still declares
+        # crypt_id=1 and we have no valid FairPlay key material (SC_Info was
+        # removed - it broke installation, see below) for the kernel to
+        # decrypt against. Zeroing crypt_id does NOT decrypt the actual
+        # __TEXT bytes - they stay ciphertext - but it stops the kernel from
+        # refusing to exec()/dlopen() the binary at all.
+        # NOTE: LIEF's Python binding names this field `crypt_id` (with an
+        # underscore), NOT `cryptid` like the raw Mach-O struct/most docs.
+        # An earlier version of this script used `cryptid`, which silently
+        # no-opped via getattr(..., 0)'s default instead of raising - so it
+        # always reported "already 0" and never actually touched anything.
+        enc_info = getattr(binary, "encryption_info", None)
+        if enc_info is not None and getattr(enc_info, "crypt_id", 0) != 0:
+            print(f"[*] {label}: found LC_ENCRYPTION_INFO_64 with crypt_id={enc_info.crypt_id}, zeroing it "
+                  f"(binary stays encrypted, this only unblocks exec()/dlopen())")
+            enc_info.crypt_id = 0
+        elif enc_info is not None:
+            print(f"[*] {label}: LC_ENCRYPTION_INFO_64 present, crypt_id already {enc_info.crypt_id}")
+        else:
+            print(f"[*] {label}: no LC_ENCRYPTION_INFO_64 on this slice")
+
     print(f"[*] Loading {main_binary} with LIEF")
     fat = lief.MachO.parse(str(main_binary))
     if fat is None:
@@ -112,48 +135,52 @@ def main() -> None:
         ]
         if load_path in existing:
             print(f"[*] {binary.header.cpu_type} slice already has the gadget load command, skipping")
-            continue
-        binary.add_library(load_path)
-        print(f"[*] Added LC_LOAD_DYLIB for {load_path} to {binary.header.cpu_type} slice")
+        else:
+            binary.add_library(load_path)
+            print(f"[*] Added LC_LOAD_DYLIB for {load_path} to {binary.header.cpu_type} slice")
         # Drop the now-invalid signature; AltStore/Sideloadly/etc. re-sign
         # the whole bundle on install regardless.
         try:
             binary.remove_signature()
         except Exception as e:
             print(f"[*] remove_signature: {e} (probably wasn't signed, fine)")
-
-        # Confirmed live on-device: launchd refuses to spawn the process at
-        # all ("Launchd job spawn failed", POSIX 80) while LC_ENCRYPTION_INFO_64
-        # still declares cryptid=1 and we have no valid FairPlay key material
-        # (SC_Info was removed - it broke installation, see above) for the
-        # kernel to decrypt against. Zeroing cryptid does NOT decrypt the
-        # actual __TEXT bytes - they stay ciphertext - but it stops the
-        # kernel from refusing to exec() the binary at all. dyld runs every
-        # loaded dylib's constructors (including FridaGadget's) before
-        # jumping into the main executable's own entry point, so Frida gets
-        # a window to attach even though the app's own code is still
-        # garbage and will crash once it's reached.
-        # NOTE: LIEF's Python binding names this field `crypt_id` (with an
-        # underscore), NOT `cryptid` like the raw Mach-O struct/most docs.
-        # An earlier version of this script used `cryptid`, which silently
-        # no-opped via getattr(..., 0)'s default instead of raising - so it
-        # always reported "already 0" and never actually touched anything.
-        # Confirmed directly: both Telegram's and Spotify's main binaries
-        # have crypt_id == 1, matching the observed "installs fine, closes
-        # instantly on launch" behavior on every build tested so far (this
-        # "fix" was a no-op the whole time).
-        enc_info = getattr(binary, "encryption_info", None)
-        if enc_info is not None and getattr(enc_info, "crypt_id", 0) != 0:
-            print(f"[*] Found LC_ENCRYPTION_INFO_64 with crypt_id={enc_info.crypt_id}, zeroing it "
-                  f"(binary stays encrypted, this only unblocks exec())")
-            enc_info.crypt_id = 0
-        elif enc_info is not None:
-            print(f"[*] LC_ENCRYPTION_INFO_64 present, crypt_id already {enc_info.crypt_id}")
-        else:
-            print("[*] No LC_ENCRYPTION_INFO_64 on this slice")
+        zero_crypt_id(binary, f"main binary ({binary.header.cpu_type})")
 
     fat.write(str(main_binary))
     print(f"[*] Wrote patched binary to {main_binary}")
+
+    # The main executable isn't the only FairPlay-encrypted Mach-O in the
+    # bundle - Apple encrypts each embedded first-party .framework the same
+    # way (own LC_ENCRYPTION_INFO_64 + own SC_Info directory). We strip
+    # every SC_Info dir in the whole bundle above (see below), so any
+    # embedded framework left at crypt_id=1 hits the exact same "won't
+    # load, no key material" failure as the main binary did - except dyld
+    # reports it as a plain "Library not loaded ... no such file" when it
+    # tries to load the framework at launch, which looks unrelated to
+    # encryption at first glance. Confirmed live on-device via crash report
+    # (DYLD termination, "Library missing": MetaSmartGlassesKit.framework)
+    # after fixing only the main binary's crypt_id. So: walk every
+    # .framework under Frameworks/ and apply the identical fix to its
+    # binary too.
+    patched_frameworks = 0
+    if frameworks_dir.is_dir():
+        for fw_dir in sorted(frameworks_dir.glob("*.framework")):
+            fw_binary = fw_dir / fw_dir.stem
+            if not fw_binary.exists():
+                continue
+            fw_fat = lief.MachO.parse(str(fw_binary))
+            if fw_fat is None:
+                print(f"[*] LIEF could not parse {fw_binary}, skipping")
+                continue
+            for binary in fw_fat:
+                try:
+                    binary.remove_signature()
+                except Exception as e:
+                    print(f"[*] remove_signature: {e} (probably wasn't signed, fine)")
+                zero_crypt_id(binary, f"{fw_dir.name} ({binary.header.cpu_type})")
+            fw_fat.write(str(fw_binary))
+            patched_frameworks += 1
+    print(f"[*] Patched crypt_id on {patched_frameworks} embedded framework(s)")
 
     # Every signable bundle (the main .app, each .framework/.appex, and any
     # nested .app like a Watch companion) carries its own
